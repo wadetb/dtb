@@ -23,13 +23,34 @@ TEST = '''
     vface 2 3 4
     { label='irregular 45'; vedge 2 3 }
 }
-
-<script>
-def intersectPlanes(scene):
-    
 '''
-
-
+# attrs:
+# style <str> - per object, per face, per edge, per vertex, ???)
+# label <str> - for UI display
+#
+# modifiers:
+# translate <vec3> - adds to positions
+#
+# prims:
+# point <pos>
+# line <from> <to>
+# vector <origin> <vec>
+# axis <origin> <x> <y> <z>
+# aabb <origin> <w> <h> <d>
+# obb <origin> <x> <y> <z>
+# sphere <origin> <radius>
+# tri <p0> <p1> <p2>
+# quad <p0> <p1> <p2> <p3>
+# poly <n> <p0...>
+#
+# context:
+# { - copy and create new context
+# } - pop context
+#
+# future attrs:
+# id <ident> - for reference by script or backref
+# script <source> - for processing of the dom?
+ 
 class TestParser(unittest.TestCase):
     def test_ident(self):
         self.assertEqual(dtb.Parser('abc').expect_ident(), 'abc')
@@ -89,9 +110,42 @@ class TestParser(unittest.TestCase):
 
 class TestDumpToBlender(unittest.TestCase):
     def test_basic(self):
-        dtb.parse("point 1.0 5.3 3.1")
-        dtb.parse("# comment")
+        dtb.loads("point 1.0 5.3 3.1")
+        dtb.loads("# comment")
 
 
 if __name__ == '__main__':
     unittest.main()
+
+#def createMeshFromData(name, origin, verts, faces):
+#    # Create mesh and object
+#    me = bpy.data.meshes.new(name + 'Mesh')
+#    ob = bpy.data.objects.new(name, me)
+#    ob.location = origin
+#    ob.show_name = True
+#
+#    # Link object to scene and make active
+#    scn = bpy.context.scene
+#    scn.objects.link(ob)
+#    scn.objects.active = ob
+#    ob.select = True
+#
+#    # Create mesh from given verts, faces.
+#    me.from_pydata(verts, [], faces)
+#    # Update mesh with new data
+#    me.update()
+#    return ob
+#
+#
+#def run(origo):
+#    origin = Vector(origo)
+#    (x, y, z) = (0.707107, 0.258819, 0.965926)
+#    verts = ((x, x, -1), (x, -x, -1), (-x, -x, -1), (-x, x, -1), (0, 0, 1))
+#    faces = ((1, 0, 4), (4, 2, 1), (4, 3, 2), (4, 0, 3), (0, 1, 2, 3))
+#
+#    cone1 = createMeshFromData('DataCone', origin, verts, faces)
+#
+#
+#if __name__ == "__main__":
+#    run((0, 0, 0))
+#

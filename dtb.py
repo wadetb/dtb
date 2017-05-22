@@ -1,23 +1,26 @@
 import bpy
-import mathutils
 from mathutils import Vector
 import re
 import typing
+
 
 class Parser:
     """A simple Recursive Descent Parser which supports the basic elements of the
     DumpToBlender data description syntax."""
 
-    WHITESPACE_OR_COMMENT = re.compile(rb'(\s+)|(#.*$)', re.MULTILINE)
-    LPAREN = re.compile(rb'\(')
-    RPAREN = re.compile(rb'\)')
-    STRING = re.compile(rb'(\'(?P<value>[^\']*)\')')
-    FLOAT = re.compile(rb'(?P<value>[+-]?\ *(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?)')
-    IDENT = re.compile(rb'(?P<value>\w+)')
+    WHITESPACE_OR_COMMENT = re.compile(r'(\s+)|(#.*$)', re.MULTILINE)
+    LPAREN = re.compile(r'\(')
+    RPAREN = re.compile(r'\)')
+    STRING = re.compile(r'(\'(?P<value>[^\']*)\')')
+    FLOAT = re.compile(
+        r'(?P<value>[+-]?\ *(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?)')
+    IDENT = re.compile(r'(?P<value>\w+)')
 
     def __init__(self, source: str):
-        self.source = memoryview(source.encode('ascii'))
+        self.source = source
         self.pos = 0
+        self.line = 1
+        self.col = 0
 
     def at_end(self) -> bool:
         """Returns True if the cursor has reached the end of the source."""
@@ -29,6 +32,8 @@ class Parser:
 
     def advance(self, num: int) -> None:
         """Advances the parsing cursor by the given number of characters."""
+        text = self.source[self.pos:self.pos + num]
+        self.line += text.count('\n')
         self.pos += num
 
     def skip_whitespace_and_comments(self) -> None:
@@ -51,9 +56,8 @@ class Parser:
         self.skip_whitespace_and_comments()
 
         if 'value' in match.groupdict():
-            return match.group('value').decode('ascii')
-        else:
-            return match.group(0).decode('ascii')
+            return match.group('value')
+        return match.group(0)
 
     def expect(self, pattern, description=None) -> str:
         """Matches and returns the value at the cursor, using the given regex which
@@ -83,76 +87,153 @@ class Parser:
             self.expect(Parser.RPAREN, ')')
         return vector
 
-def _point_primitive(p: Parser):
-    origin = p.expect_vector(3)
 
+class BlenderCreator:
+    def __init__(self):
+        pass
 
-_PRIMITIVE_HANDLERS = {
-    'point': _point_primitive
-}
+    def create(self, context):
+        mesh = bpy.data.meshes.new(context.label + ' mesh')
+
+        obj = bpy.data.objects.new(context.label, mesh)
+        obj.location = Vector((0, 0, 0))
+        obj.show_name = True
+
+        scene = bpy.context.scene
+        scene.objects.link(obj)
+        scene.objects.active = obj
+        obj.select = True
+
+        self.verts = []
+        self.edges = []
+        self.faces = []
+
+        for primitive in context.primitives:
+            primitive.create(self)
+
+        mesh.from_pydata(self.verts, self.edges, self.faces)
+        mesh.update()
+
+        del self.verts
+        del self.edges
+        del self.faces
+
+        for child in context.children:
+            self.create(child)
+
+    def add_point(self, position):
+        self.verts.append(position)
+
+    def add_line(self, from_position, to_position):
+        index = len(self.verts)
+        self.verts.append(from_position)
+        self.verts.append(to_position)
+        self.edges.append((index, index + 1))
+
 
 class Context:
     def __init__(self):
-        pass
+        self.label = ''
+        self.style = 'white'
+        self.primitives = []
+        self.parent = None
+        self.children = []
 
-class DumpToBlender:
-    def __init__(self):
-        self.root = None
+    def new_child(self):
+        new_context = Context()
+        new_context.style = self.style
+        new_context.parent = self
+        self.children.append(new_context)
+        return new_context
 
-    def loads(self, source: str):
-        p = Parser(source)
+    def add_primitive(self, primitive):
+        self.primitives.append(primitive)
 
-        self.root = Context()
 
-        p.skip_whitespace_and_comments()
-        while not p.at_end():
-            prim = p.expect_ident()
+class PointPrimitive:
+    def __init__(self, context, position):
+        self.context = context
+        self.position = position
 
-            if prim == '{':
+    def create(self, creator):
+        creator.add_point(self.position)
 
-            handler = _PRIMITIVE_HANDLERS.get(prim)
-            if not handler:
+
+class LinePrimitive:
+    def __init__(self, context, from_position, to_position):
+        self.context = context
+        self.from_position = from_position
+        self.to_position = to_position
+
+    def create(self, creator):
+        creator.add_line(self.from_position, self.to_position)
+
+
+def _load_label(parser: Parser, context: Context) -> None:
+    context.label = parser.expect_string()
+
+
+def _load_style(parser: Parser, context: Context) -> None:
+    context.style = parser.expect_string()
+
+
+def _load_point(parser: Parser, context: Context) -> None:
+    position = parser.expect_vector(3)
+    context.add_primitive(PointPrimitive(context, position))
+
+
+def _load_line(parser: Parser, context: Context) -> None:
+    from_position = parser.expect_vector(3)
+    to_position = parser.expect_vector(3)
+    context.add_primitive(LinePrimitive(context, from_position, to_position))
+
+
+def loads(source: str) -> Context:
+    parser = Parser(source)
+
+    stack = []
+    context = Context()
+
+    parser.skip_whitespace_and_comments()
+
+    while not parser.at_end():
+        prim = parser.expect_ident()
+
+        if prim == '{':
+            stack.append(context)
+            context = context.new_child()
+
+        elif prim == '}':
+            if not stack:
+                raise SyntaxError('unbalanced }')
+            context = stack.pop()
+
+        else:
+            try:
+                func = globals()["_load_{}".format(prim)]
+            except AttributeError:
                 raise SyntaxError('unknown primitive {}'.format(prim))
+            func(parser, context)
 
-            handler(p)
+    if stack:
+        raise SyntaxError('unbalanced {')
 
-    def load(self, filename: str):
-        with open(filename, 'r') as source_file:
-            source = source_file.read()
-        self.loads(source)
+    return context
 
-    def create(self):
-        pass
 
-#def createMeshFromData(name, origin, verts, faces):
-#    # Create mesh and object
-#    me = bpy.data.meshes.new(name + 'Mesh')
-#    ob = bpy.data.objects.new(name, me)
-#    ob.location = origin
-#    ob.show_name = True
-#
-#    # Link object to scene and make active
-#    scn = bpy.context.scene
-#    scn.objects.link(ob)
-#    scn.objects.active = ob
-#    ob.select = True
-#
-#    # Create mesh from given verts, faces.
-#    me.from_pydata(verts, [], faces)
-#    # Update mesh with new data
-#    me.update()
-#    return ob
-#
-#
-#def run(origo):
-#    origin = Vector(origo)
-#    (x, y, z) = (0.707107, 0.258819, 0.965926)
-#    verts = ((x, x, -1), (x, -x, -1), (-x, -x, -1), (-x, x, -1), (0, 0, 1))
-#    faces = ((1, 0, 4), (4, 2, 1), (4, 3, 2), (4, 0, 3), (0, 1, 2, 3))
-#
-#    cone1 = createMeshFromData('DataCone', origin, verts, faces)
-#
-#
-#if __name__ == "__main__":
-#    run((0, 0, 0))
-#
+def load(filename: str) -> None:
+    with open(filename, 'r') as source_file:
+        source = source_file.read()
+    return loads(source)
+
+
+def create(context) -> None:
+    creator = BlenderCreator()
+    creator.create(context)
+
+create(loads('''
+label 'test'
+line (0 0 0) (0 1 0)
+line (0 0 0) (1 0 0)
+line (0 0 0) (0 0 1)
+'''))
