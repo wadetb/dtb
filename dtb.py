@@ -1,7 +1,7 @@
-import bpy
-from mathutils import Vector
 import re
 import typing
+import bpy
+from mathutils import Matrix, Vector
 
 
 class Parser:
@@ -14,7 +14,7 @@ class Parser:
     STRING = re.compile(r'(\'(?P<value>[^\']*)\')')
     FLOAT = re.compile(
         r'(?P<value>[+-]?\ *(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?)')
-    IDENT = re.compile(r'(?P<value>\w+)')
+    IDENT = re.compile(r'(?P<value>[\w\{\}]+)')
 
     def __init__(self, source: str):
         self.source = source
@@ -92,11 +92,11 @@ class BlenderCreator:
     def __init__(self):
         pass
 
-    def create(self, context):
+    def create(self, context, parent=None):
         mesh = bpy.data.meshes.new(context.label + ' mesh')
 
         obj = bpy.data.objects.new(context.label, mesh)
-        obj.location = Vector((0, 0, 0))
+        obj.parent = parent
         obj.show_name = True
 
         scene = bpy.context.scene
@@ -104,6 +104,7 @@ class BlenderCreator:
         scene.objects.active = obj
         obj.select = True
 
+        self.context = context
         self.verts = []
         self.edges = []
         self.faces = []
@@ -111,18 +112,70 @@ class BlenderCreator:
         for primitive in context.primitives:
             primitive.create(self)
 
+        if self.verts:
+            verts_min = Vector((
+                min([Vector(v).x for v in self.verts]), \
+                min([Vector(v).y for v in self.verts]), \
+                min([Vector(v).z for v in self.verts])))
+            verts_max = Vector((
+                max([Vector(v).x for v in self.verts]), \
+                max([Vector(v).y for v in self.verts]), \
+                max([Vector(v).z for v in self.verts])))
+            verts_center = (verts_min + verts_max) * 0.5
+
+            parent_center = Vector((0, 0, 0))
+            search_parent = parent
+            while search_parent:
+                parent_center += Vector(search_parent.location)
+                search_parent = search_parent.parent
+
+            if parent:
+                obj.matrix_parent_inverse = Matrix()
+                obj.location = verts_center - parent_center
+            else:
+                obj.location = verts_center
+
+            self.verts = [(Vector(v) - verts_center) for v in self.verts]
+
         mesh.from_pydata(self.verts, self.edges, self.faces)
         mesh.update()
+
+            # label_mesh = bpy.data.meshes.new(context.label + ' label mesh')
+            # label_mesh.from_pydata([(0, 0, 0)], [], [])
+            # label_mesh.update()
+            # label_obj = bpy.data.objects.new(context.label + ' label', label_mesh)
+            # label_obj.parent = obj
+            # label_obj.show_name = True
+            # label_obj.location = center.to_tuple()
 
         del self.verts
         del self.edges
         del self.faces
 
         for child in context.children:
-            self.create(child)
+            self.create(child, obj)
 
     def add_point(self, position):
-        self.verts.append(position)
+        index = len(self.verts)
+        position = Vector(position)
+        point_size = float(self.context.style.get('point_size', 1.0))
+        self.verts.extend([
+            position + Vector((0, 0, -point_size)), \
+            position + Vector((-point_size, -point_size, 0)), \
+            position + Vector((point_size, -point_size, 0)), \
+            position + Vector((point_size, point_size, 0)), \
+            position + Vector((-point_size, point_size, 0)), \
+            position + Vector((0, 0, point_size))
+        ])
+        self.faces.extend([
+            (index, index + 1, index + 2), \
+            (index, index + 2, index + 3), \
+            (index, index + 3, index + 4), \
+            (index, index + 4, index + 1), \
+            (index +5, index + 1, index + 4), \
+            (index + 5, index + 4, index + 3), \
+            (index + 5, index + 3, index + 2),
+            (index + 5, index + 2, index + 1)])
 
     def add_line(self, from_position, to_position):
         index = len(self.verts)
@@ -130,24 +183,141 @@ class BlenderCreator:
         self.verts.append(to_position)
         self.edges.append((index, index + 1))
 
+    def add_vector(self, position, direction):
+        index = len(self.verts)
+        self.verts.append(position)
+        self.verts.append(Vector(position) + Vector(direction))
+        self.edges.append((index, index + 1))
+
+    def _clip_face(self, verts, clip_planes, clip_side='negative'):
+        for clip in clip_planes:
+            clip_normal = Vector(clip.normal)
+            clip_distance = clip.distance
+
+            if clip_side == 'positive':
+                clip_normal = -clip_normal
+                clip_distance = -clip_distance
+
+            new_verts = []
+            for cur_index, cur_vert in enumerate(verts):
+                prev_index = (cur_index + len(verts) - 1) % len(verts)
+                prev_vert = verts[prev_index]
+
+                dist_cur = clip_normal.dot(cur_vert) + clip_distance
+                dist_prev = clip_normal.dot(prev_vert) + clip_distance
+
+                if dist_cur >= 0 and dist_prev >= 0:
+                    new_verts.append(cur_vert)
+                elif dist_cur >= 0 and dist_prev < 0:
+                    lerp = -dist_prev / (dist_cur - dist_prev)
+                    new_verts.append(prev_vert + lerp * (cur_vert - prev_vert))
+                    new_verts.append(cur_vert)
+                elif dist_cur < 0 and dist_prev >= 0:
+                    lerp = -dist_prev / (dist_cur - dist_prev)
+                    new_verts.append(prev_vert + lerp * (cur_vert - prev_vert))
+
+            verts = new_verts
+
+        return verts
+
+    def add_plane(self, normal, distance):
+        normal = Vector(normal)
+        x_axis = normal.cross(Vector((0, 0, 1)))
+        if x_axis.length < 0.001:
+            x_axis = normal.cross(Vector((1, 0, 0)))
+        x_axis = x_axis.normalized()
+        y_axis = normal.cross(x_axis)
+
+        plane_size = float(self.context.style.get('plane_size', 1000))
+        x_axis = x_axis * plane_size
+        y_axis = y_axis * plane_size
+
+        origin = normal * -distance
+
+        verts = [
+            origin - x_axis - y_axis, origin + x_axis - y_axis,
+            origin + x_axis + y_axis, origin - x_axis + y_axis
+        ]
+
+        clip_side = self.context.style.get('clip_side', 'negative')
+        clip_planes = [
+            p for p in self.context.clip_planes
+            if Vector(p.normal).dot(normal) < 0.999 or
+            abs(p.distance - distance) > 0.001
+        ]
+        verts = self._clip_face(verts, clip_planes, clip_side)
+
+        if verts:
+            index = len(self.verts)
+            self.verts.extend(verts)
+            self.faces.append(tuple([index + i for i in range(len(verts))]))
+
+    def add_extents(self, extents_min, extents_max):
+        index = len(self.verts)
+        extents_min = Vector(extents_min)
+        extents_max = Vector(extents_max)
+        self.verts.extend([
+            (extents_min.x, extents_min.y, extents_min.z), \
+            (extents_max.x, extents_min.y, extents_min.z), \
+            (extents_max.x, extents_max.y, extents_min.z), \
+            (extents_min.x, extents_max.y, extents_min.z), \
+            (extents_min.x, extents_min.y, extents_max.z), \
+            (extents_max.x, extents_min.y, extents_max.z), \
+            (extents_max.x, extents_max.y, extents_max.z), \
+            (extents_min.x, extents_max.y, extents_max.z) \
+        ])
+        self.edges.extend([
+            (index + 0, index + 1), (index + 1, index + 2), \
+            (index + 2, index + 3), (index + 3, index + 0), \
+            (index + 4, index + 5), (index + 5, index + 6), \
+            (index + 6, index + 7), (index + 7, index + 4), \
+            (index + 0, index + 4), (index + 1, index + 5), \
+            (index + 2, index + 6), (index + 3, index + 7) \
+        ])
+
+    def add_projection(self, matrix):
+        col0 = Vector((matrix[0], matrix[4], matrix[8], matrix[12]))
+        col1 = Vector((matrix[1], matrix[5], matrix[9], matrix[13]))
+        col2 = Vector((matrix[2], matrix[6], matrix[10], matrix[14]))
+        col3 = Vector((matrix[3], matrix[7], matrix[11], matrix[15]))
+
+        planes = [
+            col0 - col3, -col0 - col3, col1 - col3, -col1 - col3, col2 - col3,
+            -col2 - col3
+        ]
+
 
 class Context:
     def __init__(self):
         self.label = ''
-        self.style = 'white'
+        self.style = {}
         self.primitives = []
+        self.clip_planes = []
         self.parent = None
         self.children = []
 
     def new_child(self):
         new_context = Context()
-        new_context.style = self.style
         new_context.parent = self
         self.children.append(new_context)
         return new_context
 
     def add_primitive(self, primitive):
         self.primitives.append(primitive)
+
+    def add_clip_plane(self, clip_plane):
+        self.clip_planes.append(clip_plane)
+
+    def propagate(self):
+        for child in self.children:
+            for key, value in self.style.items():
+                if not key in child.style:
+                    child.style[key] = value
+
+            for clip_plane in self.clip_planes:
+                child.clip_planes.append(clip_plane)
+
+            child.propagate()
 
 
 class PointPrimitive:
@@ -169,12 +339,68 @@ class LinePrimitive:
         creator.add_line(self.from_position, self.to_position)
 
 
+class VectorPrimitive:
+    def __init__(self, context, position, direction):
+        self.context = context
+        self.position = position
+        self.direction = direction
+
+    def create(self, creator):
+        creator.add_vector(self.position, self.direction)
+
+
+class PlanePrimitive:
+    def __init__(self, context, normal, distance):
+        self.context = context
+        self.normal = normal
+        self.distance = distance
+
+    def create(self, creator):
+        creator.add_plane(self.normal, self.distance)
+
+
+class ExtentsPrimitive:
+    def __init__(self, context, extents_min, extents_max):
+        self.context = context
+        self.extents_min = extents_min
+        self.extents_max = extents_max
+
+    def create(self, creator):
+        creator.add_extents(self.extents_min, self.extents_max)
+
+
+class ProjectionPrimitive:
+    def __init__(self, context, matrix):
+        self.context = context
+        self.matrix = matrix
+
+    def create(self, creator):
+        creator.add_projection(self.matrix)
+
+
 def _load_label(parser: Parser, context: Context) -> None:
     context.label = parser.expect_string()
 
 
+def _load_point_size(parser: Parser, context: Context) -> None:
+    point_size = parser.expect_float()
+    context.style['point_size'] = point_size
+
+
 def _load_style(parser: Parser, context: Context) -> None:
-    context.style = parser.expect_string()
+    style = parser.expect_string()
+    tokens = style.split(';')
+    for style_token in tokens:
+        var, value = style_token.split(':')
+        var = var.strip()
+        value = value.strip()
+        context.style[var] = value
+
+
+def _load_clip_plane(parser: Parser, context: Context) -> None:
+    normal = parser.expect_vector(3)
+    distance = parser.expect_float()
+    context.add_clip_plane(PlanePrimitive(context, normal, distance))
 
 
 def _load_point(parser: Parser, context: Context) -> None:
@@ -186,6 +412,29 @@ def _load_line(parser: Parser, context: Context) -> None:
     from_position = parser.expect_vector(3)
     to_position = parser.expect_vector(3)
     context.add_primitive(LinePrimitive(context, from_position, to_position))
+
+
+def _load_vector(parser: Parser, context: Context) -> None:
+    position = parser.expect_vector(3)
+    direction = parser.expect_vector(3)
+    context.add_primitive(VectorPrimitive(context, position, direction))
+
+
+def _load_plane(parser: Parser, context: Context) -> None:
+    normal = parser.expect_vector(3)
+    distance = parser.expect_float()
+    context.add_primitive(PlanePrimitive(context, normal, distance))
+
+
+def _load_extents(parser: Parser, context: Context) -> None:
+    extents_min = parser.expect_vector(3)
+    extents_max = parser.expect_vector(3)
+    context.add_primitive(ExtentsPrimitive(context, extents_min, extents_max))
+
+
+def _load_projection(parser: Parser, context: Context) -> None:
+    matrix = parser.expect_vector(16)
+    context.add_primitive(ProjectionPrimitive(context, matrix))
 
 
 def loads(source: str) -> Context:
@@ -218,6 +467,8 @@ def loads(source: str) -> Context:
     if stack:
         raise SyntaxError('unbalanced {')
 
+    context.propagate()
+
     return context
 
 
@@ -231,9 +482,5 @@ def create(context) -> None:
     creator = BlenderCreator()
     creator.create(context)
 
-create(loads('''
-label 'test'
-line (0 0 0) (0 1 0)
-line (0 0 0) (1 0 0)
-line (0 0 0) (0 0 1)
-'''))
+
+create(load('c:\\users\\wbrainerd.nbe\\desktop\\dtb.txt'))

@@ -4,7 +4,6 @@ import unittest
 import unittest.mock
 
 sys.modules['bpy'] = unittest.mock.Mock()
-sys.modules['mathutils'] = unittest.mock.Mock()
 import dtb
 
 TEST = '''
@@ -24,6 +23,7 @@ TEST = '''
     { label='irregular 45'; vedge 2 3 }
 }
 '''
+
 # attrs:
 # style <str> - per object, per face, per edge, per vertex, ???)
 # label <str> - for UI display
@@ -50,7 +50,8 @@ TEST = '''
 # future attrs:
 # id <ident> - for reference by script or backref
 # script <source> - for processing of the dom?
- 
+
+
 class TestParser(unittest.TestCase):
     def test_ident(self):
         self.assertEqual(dtb.Parser('abc').expect_ident(), 'abc')
@@ -94,12 +95,14 @@ class TestParser(unittest.TestCase):
             dtb.Parser('').expect_float()
 
     def test_vector(self):
-        self.assertEqual(dtb.Parser('1').expect_vector(1), (1.0,))
-        self.assertEqual(dtb.Parser('1#comment').expect_vector(1), (1.0,))
+        self.assertEqual(dtb.Parser('1').expect_vector(1), (1.0, ))
+        self.assertEqual(dtb.Parser('1#comment').expect_vector(1), (1.0, ))
         self.assertEqual(dtb.Parser('0 1').expect_vector(2), (0.0, 1.0))
         self.assertEqual(dtb.Parser('0 0 1').expect_vector(3), (0.0, 0.0, 1.0))
-        self.assertEqual(dtb.Parser('(0 0 1)').expect_vector(3), (0.0, 0.0, 1.0))
-        self.assertEqual(dtb.Parser('(0 0 1)#comment').expect_vector(3), (0.0, 0.0, 1.0))
+        self.assertEqual(
+            dtb.Parser('(0 0 1)').expect_vector(3), (0.0, 0.0, 1.0))
+        self.assertEqual(
+            dtb.Parser('(0 0 1)#comment').expect_vector(3), (0.0, 0.0, 1.0))
         with self.assertRaises(SyntaxError):
             dtb.Parser('(0 0 1').expect_vector(3)
         with self.assertRaises(SyntaxError):
@@ -113,39 +116,65 @@ class TestDumpToBlender(unittest.TestCase):
         dtb.loads("point 1.0 5.3 3.1")
         dtb.loads("# comment")
 
+    def test_context(self):
+        dtb.loads(
+            "{ label 'new back' plane (0.225488812 0.823184490 -0.521077752) -2.15115404 }"
+        )
+
+    def test_clip_planes(self):
+        dtb.loads('''
+            style 'plane_size: 100'
+            { label 'testcube'
+            clip_plane (-1 0 0)  10
+            clip_plane ( 1 0 0)  10
+            clip_plane (0 -1 0)  10
+            clip_plane (0  1 0)  10
+            clip_plane (0 0 -1)  10
+            clip_plane (0 0  1)  10
+            plane (-1 0 0) 10
+            plane ( 1 0 0) 10
+            plane (0 -1 0) 10
+            plane (0  1 0) 10
+            plane (0 0 -1) 10
+            plane (0 0  1) 10
+            }
+            ''')
+
+    def test_parent_translation(self):
+        dtb.loads('''
+            { label 'cube1' 
+              point (10 0 0)
+              { label 'cube2' 
+                point (10 0 0)
+                { label 'cube3' 
+                  point (10 0 0)
+                }
+              }
+            }
+            ''')
+
+    def test_misc(self):
+        dtb.loads('''
+            label 'scene'
+            { label 'right' plane (0.867572546 -0.292311847 0.402332813) -75.9123993 }
+            { label 'left' plane (-0.867572546 -0.292311966 0.402332753) 144.576431 }
+            { label 'top' plane (0 0.577145100 0.816641569) -116.847626 }
+            { label 'bottom' plane (0 -0.955019951 -0.296541661) 161.229019 }
+            { label 'back' plane (0.000000000 0.584618986 -0.811308026) -118.460983 }
+            { label 'front' plane (-0.000000000 -0.587785304 0.809016943) 68.9353638 }
+            { label 'corners'
+            point (-127.129562 -159.335098 -30.5549698)
+            point (-127.129555 -159.280167 -30.5150490)
+            point (-127.014938 -159.335098 -30.5549622)
+            point (-127.014931 -159.280167 -30.5150452)
+            point (-98.4489670 -175.003845 19.9066238)
+            point (-98.3729172 -202.544495 0.0611495972)
+            point (-155.695526 -175.003845 19.9066315)
+            point (-155.771622 -202.544495 0.0611572266)
+            }
+            { label 'center' point (-127.072250 -174.040894 -10.2755585) }
+            ''')
+
 
 if __name__ == '__main__':
     unittest.main()
-
-#def createMeshFromData(name, origin, verts, faces):
-#    # Create mesh and object
-#    me = bpy.data.meshes.new(name + 'Mesh')
-#    ob = bpy.data.objects.new(name, me)
-#    ob.location = origin
-#    ob.show_name = True
-#
-#    # Link object to scene and make active
-#    scn = bpy.context.scene
-#    scn.objects.link(ob)
-#    scn.objects.active = ob
-#    ob.select = True
-#
-#    # Create mesh from given verts, faces.
-#    me.from_pydata(verts, [], faces)
-#    # Update mesh with new data
-#    me.update()
-#    return ob
-#
-#
-#def run(origo):
-#    origin = Vector(origo)
-#    (x, y, z) = (0.707107, 0.258819, 0.965926)
-#    verts = ((x, x, -1), (x, -x, -1), (-x, -x, -1), (-x, x, -1), (0, 0, 1))
-#    faces = ((1, 0, 4), (4, 2, 1), (4, 3, 2), (4, 0, 3), (0, 1, 2, 3))
-#
-#    cone1 = createMeshFromData('DataCone', origin, verts, faces)
-#
-#
-#if __name__ == "__main__":
-#    run((0, 0, 0))
-#
