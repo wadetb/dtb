@@ -3,6 +3,8 @@ import typing
 import bpy
 from mathutils import Matrix, Vector
 
+class ParserError(Exception):
+    pass
 
 class Parser:
     """A simple Recursive Descent Parser which supports the basic elements of the
@@ -14,13 +16,19 @@ class Parser:
     STRING = re.compile(r'(\'(?P<value>[^\']*)\')')
     FLOAT = re.compile(
         r'(?P<value>[+-]?\ *(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?)')
-    IDENT = re.compile(r'(?P<value>[\w\{\}]+)')
+    IDENT = re.compile(r'(?P<value>\w+|{|})')
 
-    def __init__(self, source: str):
+    def __init__(self, source: str, filename=None):
+        self.filename = filename or '<source>'
         self.source = source
         self.pos = 0
+        self.line_pos = 0
         self.line = 1
-        self.col = 0
+        self.col = 1
+        self.skip_whitespace_and_comments()
+
+    def error(self, message):
+        raise ParserError("{}:{},{}: {}".format(self.filename, self.line, self.col, message))
 
     def at_end(self) -> bool:
         """Returns True if the cursor has reached the end of the source."""
@@ -32,9 +40,15 @@ class Parser:
 
     def advance(self, num: int) -> None:
         """Advances the parsing cursor by the given number of characters."""
-        text = self.source[self.pos:self.pos + num]
-        self.line += text.count('\n')
         self.pos += num
+
+        while True:
+            line_pos = self.source.find('\n', self.line_pos, self.pos)
+            if line_pos == -1:
+                break
+            self.line_pos = line_pos + 1
+            self.line += 1
+        self.col = self.pos - self.line_pos + 1
 
     def skip_whitespace_and_comments(self) -> None:
         """Skips all whitespace and comments at the cursor."""
@@ -64,12 +78,19 @@ class Parser:
         extracts a named group 'value'."""
         result = self.accept(pattern)
         if result is None:
-            raise SyntaxError('expected {}'.format(description))
+            self.error('expected {}'.format(description))
         return result
 
     def expect_ident(self) -> str:
         """Parses and returns the identifier at the cursor."""
         return self.expect(Parser.IDENT, 'an identifier')
+
+    def expect_enum(self, options) -> str:
+        """Parses and returns an enumeration at the cursor, given the list of options."""
+        value = self.expect(Parser.IDENT, 'one of {}'.format(options))
+        if not value in options:
+            self.error('{} is not one of {}'.format(value, options))
+        return value
 
     def expect_string(self) -> str:
         """Parses and returns the single-quoted string at the cursor."""
@@ -252,19 +273,19 @@ class BlenderCreator:
             self.verts.extend(verts)
             self.faces.append(tuple([index + i for i in range(len(verts))]))
 
-    def add_extents(self, extents_min, extents_max):
+    def add_aabb(self, aabb_min, aabb_max):
         index = len(self.verts)
-        extents_min = Vector(extents_min)
-        extents_max = Vector(extents_max)
+        aabb_min = Vector(aabb_min)
+        aabb_max = Vector(aabb_max)
         self.verts.extend([
-            (extents_min.x, extents_min.y, extents_min.z), \
-            (extents_max.x, extents_min.y, extents_min.z), \
-            (extents_max.x, extents_max.y, extents_min.z), \
-            (extents_min.x, extents_max.y, extents_min.z), \
-            (extents_min.x, extents_min.y, extents_max.z), \
-            (extents_max.x, extents_min.y, extents_max.z), \
-            (extents_max.x, extents_max.y, extents_max.z), \
-            (extents_min.x, extents_max.y, extents_max.z) \
+            (aabb_min.x, aabb_min.y, aabb_min.z), \
+            (aabb_max.x, aabb_min.y, aabb_min.z), \
+            (aabb_max.x, aabb_max.y, aabb_min.z), \
+            (aabb_min.x, aabb_max.y, aabb_min.z), \
+            (aabb_min.x, aabb_min.y, aabb_max.z), \
+            (aabb_max.x, aabb_min.y, aabb_max.z), \
+            (aabb_max.x, aabb_max.y, aabb_max.z), \
+            (aabb_min.x, aabb_max.y, aabb_max.z) \
         ])
         self.edges.extend([
             (index + 0, index + 1), (index + 1, index + 2), \
@@ -359,14 +380,14 @@ class PlanePrimitive:
         creator.add_plane(self.normal, self.distance)
 
 
-class ExtentsPrimitive:
-    def __init__(self, context, extents_min, extents_max):
+class AABBPrimitive:
+    def __init__(self, context, aabb_min, aabb_max):
         self.context = context
-        self.extents_min = extents_min
-        self.extents_max = extents_max
+        self.aabb_min = aabb_min
+        self.aabb_max = aabb_max
 
     def create(self, creator):
-        creator.add_extents(self.extents_min, self.extents_max)
+        creator.add_aabb(self.aabb_min, self.aabb_max)
 
 
 class ProjectionPrimitive:
@@ -378,67 +399,67 @@ class ProjectionPrimitive:
         creator.add_projection(self.matrix)
 
 
-def _load_label(parser: Parser, context: Context) -> None:
+def _parse_label(parser: Parser, context: Context) -> None:
     context.label = parser.expect_string()
 
 
-def _load_point_size(parser: Parser, context: Context) -> None:
+def _parse_point_size(parser: Parser, context: Context) -> None:
     point_size = parser.expect_float()
     context.style['point_size'] = point_size
 
 
-def _load_style(parser: Parser, context: Context) -> None:
-    style = parser.expect_string()
-    tokens = style.split(';')
-    for style_token in tokens:
-        var, value = style_token.split(':')
-        var = var.strip()
-        value = value.strip()
-        context.style[var] = value
+def _parse_plane_size(parser: Parser, context: Context) -> None:
+    plane_size = parser.expect_float()
+    context.style['plane_size'] = plane_size
 
 
-def _load_clip_plane(parser: Parser, context: Context) -> None:
+def _parse_clip_side(parser: Parser, context: Context) -> None:
+    clip_side = parser.expect_enum(['positive', 'negative'])
+    context.style['clip_side'] = clip_side
+
+
+def _parse_clip_plane(parser: Parser, context: Context) -> None:
     normal = parser.expect_vector(3)
     distance = parser.expect_float()
     context.add_clip_plane(PlanePrimitive(context, normal, distance))
 
 
-def _load_point(parser: Parser, context: Context) -> None:
+def _parse_point(parser: Parser, context: Context) -> None:
     position = parser.expect_vector(3)
     context.add_primitive(PointPrimitive(context, position))
 
 
-def _load_line(parser: Parser, context: Context) -> None:
+def _parse_line(parser: Parser, context: Context) -> None:
     from_position = parser.expect_vector(3)
     to_position = parser.expect_vector(3)
     context.add_primitive(LinePrimitive(context, from_position, to_position))
 
 
-def _load_vector(parser: Parser, context: Context) -> None:
+def _parse_vector(parser: Parser, context: Context) -> None:
     position = parser.expect_vector(3)
     direction = parser.expect_vector(3)
     context.add_primitive(VectorPrimitive(context, position, direction))
 
 
-def _load_plane(parser: Parser, context: Context) -> None:
+def _parse_plane(parser: Parser, context: Context) -> None:
     normal = parser.expect_vector(3)
     distance = parser.expect_float()
     context.add_primitive(PlanePrimitive(context, normal, distance))
 
 
-def _load_extents(parser: Parser, context: Context) -> None:
-    extents_min = parser.expect_vector(3)
-    extents_max = parser.expect_vector(3)
-    context.add_primitive(ExtentsPrimitive(context, extents_min, extents_max))
+def _parse_aabb(parser: Parser, context: Context) -> None:
+    aabb_min = parser.expect_vector(3)
+    aabb_max = parser.expect_vector(3)
+    context.add_primitive(AABBPrimitive(context, aabb_min, aabb_max))
 
 
-def _load_projection(parser: Parser, context: Context) -> None:
+def _parse_projection(parser: Parser, context: Context) -> None:
     matrix = parser.expect_vector(16)
     context.add_primitive(ProjectionPrimitive(context, matrix))
 
 
-def loads(source: str) -> Context:
-    parser = Parser(source)
+def loads(source: str, filename=None) -> Context:
+    parser = Parser(source, filename)
 
     stack = []
     context = Context()
@@ -446,26 +467,27 @@ def loads(source: str) -> Context:
     parser.skip_whitespace_and_comments()
 
     while not parser.at_end():
-        prim = parser.expect_ident()
+        token = parser.expect_ident()
 
-        if prim == '{':
-            stack.append(context)
+        if token == '{':
+            stack.append((context, (parser.filename, parser.line, parser.col)))
             context = context.new_child()
 
-        elif prim == '}':
+        elif token == '}':
             if not stack:
-                raise SyntaxError('unbalanced }')
-            context = stack.pop()
+                parser.error('unbalanced }')
+            context = stack.pop()[0]
 
         else:
             try:
-                func = globals()["_load_{}".format(prim)]
-            except AttributeError:
-                raise SyntaxError('unknown primitive {}'.format(prim))
+                func = globals()["_parse_{}".format(token)]
+            except KeyError:
+                parser.error('unknown primitive {}'.format(token))
             func(parser, context)
 
     if stack:
-        raise SyntaxError('unbalanced {')
+        filename, line, col = stack[0][1]
+        raise parser.error('unbalanced {{ from {}:{},{}'.format(filename, line, col))
 
     context.propagate()
 
@@ -475,7 +497,7 @@ def loads(source: str) -> Context:
 def load(filename: str) -> None:
     with open(filename, 'r') as source_file:
         source = source_file.read()
-    return loads(source)
+    return loads(source, filename)
 
 
 def create(context) -> None:

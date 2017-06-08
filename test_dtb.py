@@ -6,52 +6,6 @@ import unittest.mock
 sys.modules['bpy'] = unittest.mock.Mock()
 import dtb
 
-TEST = '''
-# comment
-{
-    origin 45 35 1
-    color blue # property change persists until overridden or the end of the object
-    point 1.0 5.3 3.1
-    line (10 11 12) (13 14 15)
-    { name 'normal'; color red; vector (10 10 10) (0 1 0) }
-    face (0 0 0) (1 0 0) (1 1 0) (0 0 1)
-
-    vertex 2 0.5 0.5 0.5
-    vnormal 2 1 0 0 
-    vcolor 2 1 1 1 1
-    vface 2 3 4
-    { label='irregular 45'; vedge 2 3 }
-}
-'''
-
-# attrs:
-# style <str> - per object, per face, per edge, per vertex, ???)
-# label <str> - for UI display
-#
-# modifiers:
-# translate <vec3> - adds to positions
-#
-# prims:
-# point <pos>
-# line <from> <to>
-# vector <origin> <vec>
-# axis <origin> <x> <y> <z>
-# aabb <origin> <w> <h> <d>
-# obb <origin> <x> <y> <z>
-# sphere <origin> <radius>
-# tri <p0> <p1> <p2>
-# quad <p0> <p1> <p2> <p3>
-# poly <n> <p0...>
-#
-# context:
-# { - copy and create new context
-# } - pop context
-#
-# future attrs:
-# id <ident> - for reference by script or backref
-# script <source> - for processing of the dom?
-
-
 class TestParser(unittest.TestCase):
     def test_ident(self):
         self.assertEqual(dtb.Parser('abc').expect_ident(), 'abc')
@@ -59,16 +13,16 @@ class TestParser(unittest.TestCase):
         self.assertEqual(dtb.Parser('xyz_abc').expect_ident(), 'xyz_abc')
         self.assertEqual(dtb.Parser('a 2').expect_ident(), 'a')
         self.assertEqual(dtb.Parser('a2').expect_ident(), 'a2')
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('$ident').expect_ident()
 
     def test_string(self):
         self.assertEqual(dtb.Parser('\'abc\'').expect_string(), 'abc')
         self.assertEqual(dtb.Parser('\'abc\'#comment').expect_string(), 'abc')
         self.assertEqual(dtb.Parser('\'\'').expect_string(), '')
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('"abc\'').expect_string()
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('').expect_string()
 
     def test_float(self):
@@ -85,13 +39,13 @@ class TestParser(unittest.TestCase):
         self.assertEqual(dtb.Parser('1.0E+6').expect_float(), 1000000)
         self.assertEqual(dtb.Parser('1234 5678').expect_float(), 1234)
         self.assertEqual(dtb.Parser('123..456').expect_float(), 123)
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('++1234').expect_float()
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('-').expect_float()
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('a1').expect_float()
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('').expect_float()
 
     def test_vector(self):
@@ -103,12 +57,35 @@ class TestParser(unittest.TestCase):
             dtb.Parser('(0 0 1)').expect_vector(3), (0.0, 0.0, 1.0))
         self.assertEqual(
             dtb.Parser('(0 0 1)#comment').expect_vector(3), (0.0, 0.0, 1.0))
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('(0 0 1').expect_vector(3)
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('0 x y').expect_vector(3)
-        with self.assertRaises(SyntaxError):
+        with self.assertRaises(dtb.ParserError):
             dtb.Parser('0 1').expect_vector(3)
+
+    def test_enum(self):
+        self.assertEqual(dtb.Parser('foo').expect_enum(['foo']), 'foo')
+        with self.assertRaises(dtb.ParserError):
+            dtb.Parser('bar').expect_enum(['foo'])
+
+    def test_line_col(self):
+        parser = dtb.Parser('xyz')
+        self.assertEqual(parser.line, 1)
+        self.assertEqual(parser.col, 1)
+        parser = dtb.Parser('xyz')
+        parser.expect_ident()
+        self.assertEqual(parser.line, 1)
+        self.assertEqual(parser.col, 4)
+        parser = dtb.Parser('xyz\nabcdef')
+        parser.expect_ident()
+        parser.expect_ident()
+        self.assertEqual(parser.line, 2)
+        self.assertEqual(parser.col, 7)
+        parser = dtb.Parser('\n\n\n#comment\nabc')
+        parser.expect_ident()
+        self.assertEqual(parser.line, 5)
+        self.assertEqual(parser.col, 4)
 
 
 class TestDumpToBlender(unittest.TestCase):
@@ -117,13 +94,21 @@ class TestDumpToBlender(unittest.TestCase):
         dtb.loads("# comment")
 
     def test_context(self):
-        dtb.loads(
-            "{ label 'new back' plane (0.225488812 0.823184490 -0.521077752) -2.15115404 }"
-        )
+        with self.assertRaises(dtb.ParserError):
+            dtb.loads("}")
+        with self.assertRaises(dtb.ParserError):
+            dtb.loads("{}}")
+        with self.assertRaises(dtb.ParserError):
+            dtb.loads("{")
+        with self.assertRaises(dtb.ParserError):
+            dtb.loads("{{}")
+        dtb.loads("{}")
+        dtb.loads("{{}}")
+        dtb.loads("{{{}}}")
 
     def test_clip_planes(self):
         dtb.loads('''
-            style 'plane_size: 100'
+            plane_size 100
             { label 'testcube'
             clip_plane (-1 0 0)  10
             clip_plane ( 1 0 0)  10
